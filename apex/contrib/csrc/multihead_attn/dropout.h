@@ -1,5 +1,11 @@
 #include <ATen/ATen.h>
+
+#ifdef OLD_GENERATOR
 #include <ATen/CUDAGenerator.h>
+#else
+#include <ATen/CUDAGeneratorImpl.h>
+#endif
+
 #include <ATen/cuda/CUDAContext.h>
 #include <curand_kernel.h>
 
@@ -36,10 +42,11 @@ __global__ void apex_fused_dropout_kernel(scalar_t const                *inputs,
        linearIndex += gridDim.x * blockDim.x*UNROLL) {
        float4 rand = curand_uniform4(&state);
        scalar_t src[UNROLL];
-       rand.x = rand.x < p;
-       rand.y = rand.y < p;
-       rand.z = rand.z < p;
-       rand.w = rand.w < p;
+       rand.x = rand.x <= p;
+       rand.y = rand.y <= p;
+       rand.z = rand.z <= p;
+       rand.w = rand.w <= p;
+
        for (int ii = 0; ii < UNROLL; ii++) {
            IndexType li = linearIndex + blockDim.x * gridDim.x * ii;
            if (li < totalElements) {
@@ -49,7 +56,7 @@ __global__ void apex_fused_dropout_kernel(scalar_t const                *inputs,
        for (int ii = 0; ii < UNROLL; ii++) {
            IndexType li = linearIndex + blockDim.x * gridDim.x * ii;
            if (li < totalElements) {
-	           outputs[li] = src[ii]*static_cast<scalar_t>((&rand.x)[ii]*pinv);
+	           outputs[li] = src[ii]*(&rand.x)[ii]*pinv;
                mask[li]    = (uint8_t)(&rand.x)[ii];
            }
        }
@@ -88,10 +95,10 @@ __global__ void apex_dropout_add_kernel(scalar_t const                *inputs,
        float4 rand = curand_uniform4(&state);
        scalar_t src[UNROLL];
        scalar_t add_src[UNROLL];
-       rand.x = rand.x < p;
-       rand.y = rand.y < p;
-       rand.z = rand.z < p;
-       rand.w = rand.w < p;
+       rand.x = rand.x <= p;
+       rand.y = rand.y <= p;
+       rand.z = rand.z <= p;
+       rand.w = rand.w <= p;
        for (int ii = 0; ii < UNROLL; ii++) {
            IndexType li = linearIndex + blockDim.x * gridDim.x * ii;
            if (li < totalElements) {
@@ -102,9 +109,8 @@ __global__ void apex_dropout_add_kernel(scalar_t const                *inputs,
        for (int ii = 0; ii < UNROLL; ii++) {
            IndexType li = linearIndex + blockDim.x * gridDim.x * ii;
            if (li < totalElements) {
-	           accscalar_t int1 = static_cast<accscalar_t>((&rand.x)[ii]) * static_cast<accscalar_t>(src[ii]);
-	           accscalar_t int2 = int1 * static_cast<accscalar_t>(pinv);
-	           outputs[li] = static_cast<scalar_t>(static_cast<accscalar_t>(add_src[ii]) + int2);
+	           accscalar_t int1 = src[ii] * (&rand.x)[ii] * pinv;
+	           outputs[li] = static_cast<scalar_t>(static_cast<accscalar_t>(add_src[ii]) + int1);
                mask[li]    = (uint8_t)(&rand.x)[ii];
            }
        }
@@ -176,7 +182,7 @@ __global__ void apex_masked_scale_kernel(scalar_t const *inputs,
        for (int ii = 0; ii < UNROLL; ii++) {
            IndexType li = linearIndex + blockDim.x * gridDim.x * ii;
            if (li < totalElements) {
-               outputs[li] = static_cast<scalar_t>(src[ii]*static_cast<scalar_t>(scale)) * msk[ii];
+               outputs[li] = static_cast<accscalar_t>(src[ii]) * scale * static_cast<accscalar_t>(msk[ii]);
            }
        }
   }
@@ -206,8 +212,13 @@ void apex_fused_dropout_cuda(scalar_t const *inputs,
   std::pair<uint64_t, uint64_t> rng_engine_inputs;
   {
     // See Note [Acquire lock when using random generators]
+#ifdef OLD_GENERATOR
     std::lock_guard<std::mutex> lock(gen->mutex_);
     rng_engine_inputs = gen->philox_engine_inputs(counter_offset);
+#else
+    std::lock_guard<std::mutex> lock(gen.mutex());
+    rng_engine_inputs = at::check_generator<at::CUDAGeneratorImpl>(gen)->philox_engine_inputs(counter_offset);
+#endif
   }
 
   apex_fused_dropout_kernel<scalar_t, accscalar_t, IndexType><<<grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(inputs, outputs, mask, totalElements, p, rng_engine_inputs);
@@ -239,8 +250,13 @@ void apex_dropout_add_cuda(scalar_t const *inputs,
   std::pair<uint64_t, uint64_t> rng_engine_inputs;
   {
     // See Note [Acquire lock when using random generators]
+#ifdef OLD_GENERATOR
     std::lock_guard<std::mutex> lock(gen->mutex_);
     rng_engine_inputs = gen->philox_engine_inputs(counter_offset);
+#else
+    std::lock_guard<std::mutex> lock(gen.mutex());
+    rng_engine_inputs = at::check_generator<at::CUDAGeneratorImpl>(gen)->philox_engine_inputs(counter_offset);
+#endif
   }
 
   apex_dropout_add_kernel<scalar_t, accscalar_t, IndexType><<<grid, dim_block, 0, at::cuda::getCurrentCUDAStream()>>>(inputs, add_inputs, outputs, mask, totalElements, p, rng_engine_inputs);

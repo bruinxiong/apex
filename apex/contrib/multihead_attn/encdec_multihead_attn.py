@@ -1,3 +1,5 @@
+import math
+
 import torch
 from torch import nn
 from torch.nn import Parameter
@@ -6,7 +8,12 @@ import torch.nn.functional as F
 from .encdec_multihead_attn_func               import encdec_attn_func
 from .fast_encdec_multihead_attn_func          import fast_encdec_attn_func
 from .fast_encdec_multihead_attn_norm_add_func import fast_encdec_attn_norm_add_func
+from apex.normalization.fused_layer_norm       import FusedLayerNorm
 
+if hasattr(torch._C, '_jit_set_profiling_executor') :
+    torch._C._jit_set_profiling_executor(False)
+if hasattr(torch._C, '_jit_set_profiling_mode') :
+    torch._C._jit_set_profiling_mode(False)
 
 @torch.jit.script
 def jit_dropout_add(x, residual, prob, is_training):
@@ -57,9 +64,9 @@ class EncdecMultiheadAttn(nn.Module):
                 self.register_parameter('lyr_norm_beta_weights', None)
                 self.lyr_nrm_gamma_weights = None
                 self.lyr_nrm_beta_weights  = None
-                self.lyr_nrm = torch.nn.LayerNorm(embed_dim)
+                self.lyr_nrm = FusedLayerNorm(embed_dim)
         self.reset_parameters()
-        
+
         if self.include_norm_add:
             if   impl == 'fast'    : self.attn_func = fast_encdec_attn_norm_add_func
             elif impl == 'default' : self.attn_func = encdec_attn_func
@@ -71,7 +78,11 @@ class EncdecMultiheadAttn(nn.Module):
 
     def reset_parameters(self):
         nn.init.xavier_uniform_(self.in_proj_weight_q)
-        nn.init.xavier_uniform_(self.in_proj_weight_kv)
+        # in_proj_weight_kv has shape [2 * hidden, hidden] but it should be
+        # initialized like a [hidden, hidden] matrix.
+        # sqrt(6 / (hidden + hidden)) / sqrt(6 / (2 * hidden + hidden)) = sqrt(1.5)
+        # therefore xavier_uniform gain should be set to sqrt(1.5).
+        nn.init.xavier_uniform_(self.in_proj_weight_kv, gain=math.sqrt(1.5))
         nn.init.xavier_uniform_(self.out_proj_weight)
         if self.bias:
             nn.init.constant_(self.in_proj_bias_q, 0.)
